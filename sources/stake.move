@@ -19,28 +19,51 @@ module harvest::stake {
     // Error codes
     //==============================================================================================
 
+    /// Pool does not exist at the specified address
     const ERR_NO_POOL: u64 = 100;
+    /// Pool already exists for this stake and reward token pair
     const ERR_POOL_ALREADY_EXISTS: u64 = 101;
+    /// Reward per second cannot be zero (reward amount / duration must be > 0)
     const ERR_REWARD_CANNOT_BE_ZERO: u64 = 102;
+    /// User has no stake in this pool
     const ERR_NO_STAKE: u64 = 103;
+    /// User does not have enough staked balance for this operation
     const ERR_NOT_ENOUGH_S_BALANCE: u64 = 104;
+    /// Amount must be greater than zero
     const ERR_AMOUNT_CANNOT_BE_ZERO: u64 = 105;
+    /// No rewards available to harvest
     const ERR_NOTHING_TO_HARVEST: u64 = 106;
+    /// Cannot unstake before unlock time (1 week lock period)
     const ERR_TOO_EARLY_UNSTAKE: u64 = 108;
+    /// Pool is in emergency mode, normal operations are disabled
     const ERR_EMERGENCY: u64 = 109;
+    /// Pool is not in emergency mode, cannot perform emergency operations
     const ERR_NO_EMERGENCY: u64 = 110;
+    /// Caller does not have permission to enable emergency mode
     const ERR_NOT_ENOUGH_PERMISSIONS_FOR_EMERGENCY: u64 = 111;
+    /// Duration must be greater than zero
     const ERR_DURATION_CANNOT_BE_ZERO: u64 = 112;
+    /// Harvest period has ended, cannot stake or add rewards
     const ERR_HARVEST_FINISHED: u64 = 113;
+    /// Cannot withdraw rewards yet, must wait for withdrawal period
     const ERR_NOT_WITHDRAW_PERIOD: u64 = 114;
+    /// Caller is not the treasury admin
     const ERR_NOT_TREASURY: u64 = 115;
+    /// NFT collection is not configured
     const ERR_NO_COLLECTION: u64 = 116;
+    /// Boost percent is invalid (must be between 1 and 100)
     const ERR_INVALID_BOOST_PERCENT: u64 = 117;
+    /// Pool does not have NFT boost enabled
     const ERR_NON_BOOST_POOL: u64 = 118;
+    /// User already has an NFT boost applied
     const ERR_ALREADY_BOOSTED: u64 = 119;
+    /// NFT collection does not match the pool's configured collection
     const ERR_WRONG_TOKEN_COLLECTION: u64 = 120;
+    /// User does not have an NFT boost to remove
     const ERR_NO_BOOST: u64 = 121;
+    /// NFT amount must be exactly 1
     const ERR_NFT_AMOUNT_MORE_THAN_ONE: u64 = 122;
+    /// Reward token decimals must be 10 or less for calculation safety
     const ERR_INVALID_REWARD_DECIMALS: u64 = 123;
 
     //==============================================================================================

@@ -251,7 +251,7 @@ module harvest::stake {
         pool.end_timestamp = pool.end_timestamp + additional_duration;
         pool.reward_amount = pool.reward_amount + amount;
 
-        // 🎯 Deposit to pool object's primary store
+        // Deposit rewards to pool object's primary store
         primary_fungible_store::deposit(pool_addr, coins);
 
         event::emit_event<DepositRewardEvent>(
@@ -410,7 +410,7 @@ module harvest::stake {
 
         user_stake.earned_reward = 0;
 
-        // 🎯 Update tracked amount
+        // Update tracked amount
         pool.reward_amount = pool.reward_amount - earned;
 
         event::emit_event<HarvestEvent>(

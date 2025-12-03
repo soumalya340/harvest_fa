@@ -54,7 +54,7 @@ module harvest::stake {
     const ACCUM_REWARD_SCALE: u128 = 1000000000000;
 
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
-    struct StakePool<phantom S, phantom R> has key {
+    struct StakePool has key {
         pool_creator: address, // Address of the pool creator (for deriving object address)
         stake_metadata: Object<Metadata>,
         reward_metadata: Object<Metadata>,
@@ -106,7 +106,7 @@ module harvest::stake {
 
     /// Creates a unique pool address based on owner and token metadata.
     /// Each combination of stake and reward tokens gets a unique pool address.
-    fun get_pool_address<S, R>(
+    fun get_pool_address(
         owner: address, stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
     ): address {
         // Get token names for unique identification
@@ -123,8 +123,8 @@ module harvest::stake {
     }
 
     /// Get pool object signer using ExtendRef
-    fun get_pool_signer<S, R>(pool_addr: address): signer acquires StakePool {
-        let pool = borrow_global<StakePool<S, R>>(pool_addr);
+    fun get_pool_signer(pool_addr: address): signer acquires StakePool {
+        let pool = borrow_global<StakePool>(pool_addr);
         object::generate_signer_for_extending(&pool.extend_ref)
     }
 
@@ -139,7 +139,7 @@ module harvest::stake {
         NFTBoostConfig { boost_percent, collection_owner, collection_name }
     }
 
-    public fun register_pool<S, R>(
+    public fun register_pool(
         owner: &signer,
         stake_metadata: Object<Metadata>,
         reward_metadata: Object<Metadata>,
@@ -148,13 +148,11 @@ module harvest::stake {
         nft_boost_config: Option<NFTBoostConfig>
     ) {
         let owner_addr = signer::address_of(owner);
-        let pool_addr = get_pool_address<S, R>(
-            owner_addr, stake_metadata, reward_metadata
-        );
+        let pool_addr = get_pool_address(owner_addr, stake_metadata, reward_metadata);
 
         // Check pool doesn't exist
         assert!(
-            !exists<StakePool<S, R>>(pool_addr),
+            !exists<StakePool>(pool_addr),
             ERR_POOL_ALREADY_EXISTS
         );
         assert!(duration > 0, ERR_DURATION_CANNOT_BE_ZERO);
@@ -190,13 +188,11 @@ module harvest::stake {
         let extend_ref = object::generate_extend_ref(&constructor_ref);
         let object_signer = object::generate_signer(&constructor_ref);
 
-        let pool_addr = get_pool_address<S, R>(
-            owner_addr, stake_metadata, reward_metadata
-        );
+        let pool_addr = get_pool_address(owner_addr, stake_metadata, reward_metadata);
 
         primary_fungible_store::deposit(pool_addr, reward_coins);
 
-        let pool = StakePool<S, R> {
+        let pool = StakePool {
             pool_creator: owner_addr,
             stake_metadata,
             reward_metadata,
@@ -236,18 +232,13 @@ module harvest::stake {
     // Deposit Rewards - Uses Object Signer
     //==============================================================================================
 
-    public fun deposit_reward_coins<S, R>(
-        depositor: &signer,
-        pool_obj: Object<StakePool<S, R>>,
-        coins: FungibleAsset
+    public fun deposit_reward_coins(
+        depositor: &signer, pool_obj: Object<StakePool>, coins: FungibleAsset
     ) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
         assert!(!is_finished_inner(pool), ERR_HARVEST_FINISHED);
 
@@ -277,21 +268,16 @@ module harvest::stake {
     // Stake - User Deposits Tokens
     //==============================================================================================
 
-    public fun stake<S, R>(
-        user: &signer,
-        pool_obj: Object<StakePool<S, R>>,
-        coins: FungibleAsset
+    public fun stake(
+        user: &signer, pool_obj: Object<StakePool>, coins: FungibleAsset
     ) acquires StakePool {
         let amount = fungible_asset::amount(&coins);
         assert!(amount > 0, ERR_AMOUNT_CANNOT_BE_ZERO);
 
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
         assert!(!is_finished_inner(pool), ERR_HARVEST_FINISHED);
 
@@ -332,10 +318,10 @@ module harvest::stake {
             user_stake.unlock_time = current_time + WEEK_IN_SECONDS;
         };
 
-        // 🎯 Update tracked amount
+        // Update tracked amount
         pool.stake_amount = pool.stake_amount + amount;
 
-        // 🎯 Deposit to pool object's primary store
+        //  Deposit to pool object's primary store
         primary_fungible_store::deposit(pool_addr, coins);
 
         event::emit_event<StakeEvent>(
@@ -348,20 +334,15 @@ module harvest::stake {
     // Unstake - Withdraw Tokens
     //==============================================================================================
 
-    public fun unstake<S, R>(
-        user: &signer,
-        pool_obj: Object<StakePool<S, R>>,
-        amount: u64
+    public fun unstake(
+        user: &signer, pool_obj: Object<StakePool>, amount: u64
     ): FungibleAsset acquires StakePool {
         assert!(amount > 0, ERR_AMOUNT_CANNOT_BE_ZERO);
 
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
 
         let user_address = signer::address_of(user);
@@ -392,7 +373,7 @@ module harvest::stake {
         user_stake.unobtainable_reward =
             (pool.accum_reward * user_stake_amount_with_boosted(user_stake)) / pool.scale;
 
-        // 🎯 Update tracked amount
+        // Update tracked amount
         pool.stake_amount = pool.stake_amount - amount;
 
         event::emit_event<UnstakeEvent>(
@@ -400,7 +381,7 @@ module harvest::stake {
             UnstakeEvent { user_address, amount }
         );
 
-        // 🎯 Pool object signs and transfers tokens!
+        //  Pool object signs and transfers tokens!
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         primary_fungible_store::withdraw(&pool_signer, pool.stake_metadata, amount)
     }
@@ -409,16 +390,11 @@ module harvest::stake {
     // Harvest - Claim Rewards
     //==============================================================================================
 
-    public fun harvest<S, R>(
-        user: &signer, pool_obj: Object<StakePool<S, R>>
-    ): FungibleAsset acquires StakePool {
+    public fun harvest(user: &signer, pool_obj: Object<StakePool>): FungibleAsset acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
 
         let user_address = signer::address_of(user);
@@ -442,7 +418,7 @@ module harvest::stake {
             HarvestEvent { user_address, amount: earned }
         );
 
-        // 🎯 Pool object signs and transfers rewards!
+        //  Pool object signs and transfers rewards!
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         primary_fungible_store::withdraw(&pool_signer, pool.reward_metadata, earned)
     }
@@ -451,18 +427,13 @@ module harvest::stake {
     // Boost Functions (similar pattern)
     //==============================================================================================
 
-    public fun boost<S, R>(
-        user: &signer,
-        pool_obj: Object<StakePool<S, R>>,
-        nft: Token
+    public fun boost(
+        user: &signer, pool_obj: Object<StakePool>, nft: Token
     ) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
         assert!(option::is_some(&pool.nft_boost_config), ERR_NON_BOOST_POOL);
 
@@ -509,16 +480,11 @@ module harvest::stake {
         );
     }
 
-    public fun remove_boost<S, R>(
-        user: &signer, pool_obj: Object<StakePool<S, R>>
-    ): Token acquires StakePool {
+    public fun remove_boost(user: &signer, pool_obj: Object<StakePool>): Token acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
 
         let user_address = signer::address_of(user);
@@ -549,35 +515,29 @@ module harvest::stake {
     // Emergency Functions
     //==============================================================================================
 
-    public fun enable_emergency<S, R>(
-        admin: &signer, pool_obj: Object<StakePool<S, R>>
+    public fun enable_emergency(
+        admin: &signer, pool_obj: Object<StakePool>
     ) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
         assert!(
             signer::address_of(admin) == stake_config::get_emergency_admin_address(),
             ERR_NOT_ENOUGH_PERMISSIONS_FOR_EMERGENCY
         );
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
 
         pool.emergency_locked = true;
     }
 
-    public fun emergency_unstake<S, R>(
-        user: &signer, pool_obj: Object<StakePool<S, R>>
+    public fun emergency_unstake(
+        user: &signer, pool_obj: Object<StakePool>
     ): (FungibleAsset, Option<Token>) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
         assert!(is_emergency_inner(pool), ERR_NO_EMERGENCY);
 
         let user_addr = signer::address_of(user);
@@ -604,22 +564,17 @@ module harvest::stake {
         (coins, nft)
     }
 
-    public fun withdraw_to_treasury<S, R>(
-        treasury: &signer,
-        pool_obj: Object<StakePool<S, R>>,
-        amount: u64
+    public fun withdraw_to_treasury(
+        treasury: &signer, pool_obj: Object<StakePool>, amount: u64
     ): FungibleAsset acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
         assert!(
             signer::address_of(treasury) == stake_config::get_treasury_admin_address(),
             ERR_NOT_TREASURY
         );
 
-        let pool = borrow_global_mut<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global_mut<StakePool>(pool_addr);
 
         if (!is_emergency_inner(pool)) {
             let now = timestamp::now_seconds();
@@ -635,67 +590,53 @@ module harvest::stake {
         primary_fungible_store::withdraw(&pool_signer, pool.reward_metadata, amount)
     }
 
-    public fun get_pool_total_stake<S, R>(
-        pool_obj: Object<StakePool<S, R>>
-    ): u64 acquires StakePool {
+    public fun get_pool_total_stake(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
         // Query the object's primary store
-        let pool = borrow_global<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global<StakePool>(pool_addr);
         primary_fungible_store::balance(pool_addr, pool.stake_metadata)
     }
 
-    public fun get_pool_total_reward<S, R>(
-        pool_obj: Object<StakePool<S, R>>
-    ): u64 acquires StakePool {
+    public fun get_pool_total_reward(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        assert!(
-            exists<StakePool<S, R>>(pool_addr),
-            ERR_NO_POOL
-        );
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        let pool = borrow_global<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global<StakePool>(pool_addr);
         primary_fungible_store::balance(pool_addr, pool.reward_metadata)
     }
 
-    public fun pool_exists<S, R>(pool_obj: Object<StakePool<S, R>>): bool {
+    public fun pool_exists(pool_obj: Object<StakePool>): bool {
         let pool_addr = object::object_address(&pool_obj);
-        exists<StakePool<S, R>>(pool_addr)
+        exists<StakePool>(pool_addr)
     }
 
     /// Returns the pool object address from creator and token metadata
-    public fun get_pool_address_view<S, R>(
+    public fun get_pool_address_view(
         pool_creator: address,
         stake_metadata: Object<Metadata>,
         reward_metadata: Object<Metadata>
     ): address {
-        get_pool_address<S, R>(pool_creator, stake_metadata, reward_metadata)
+        get_pool_address(pool_creator, stake_metadata, reward_metadata)
     }
 
     /// Converts pool address to pool object
-    public fun address_to_pool_object<S, R>(pool_addr: address): Object<StakePool<S, R>> {
-        object::address_to_object<StakePool<S, R>>(pool_addr)
+    public fun address_to_pool_object(pool_addr: address): Object<StakePool> {
+        object::address_to_object<StakePool>(pool_addr)
     }
 
     /// Get stake metadata from pool
-    public fun get_stake_metadata<S, R>(
-        pool_obj: Object<StakePool<S, R>>
-    ): Object<Metadata> acquires StakePool {
+    public fun get_stake_metadata(pool_obj: Object<StakePool>): Object<Metadata> acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        let pool = borrow_global<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global<StakePool>(pool_addr);
         pool.stake_metadata
     }
 
     /// Get reward metadata from pool
-    public fun get_reward_metadata<S, R>(
-        pool_obj: Object<StakePool<S, R>>
-    ): Object<Metadata> acquires StakePool {
+    public fun get_reward_metadata(pool_obj: Object<StakePool>): Object<Metadata> acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
-        let pool = borrow_global<StakePool<S, R>>(pool_addr);
+        let pool = borrow_global<StakePool>(pool_addr);
         pool.reward_metadata
     }
 
@@ -703,16 +644,16 @@ module harvest::stake {
     // Private Helper Functions
     //==============================================================================================
 
-    fun is_emergency_inner<S, R>(pool: &StakePool<S, R>): bool {
+    fun is_emergency_inner(pool: &StakePool): bool {
         pool.emergency_locked || stake_config::is_global_emergency()
     }
 
-    fun is_finished_inner<S, R>(pool: &StakePool<S, R>): bool {
+    fun is_finished_inner(pool: &StakePool): bool {
         let now = timestamp::now_seconds();
         now >= pool.end_timestamp
     }
 
-    fun update_accum_reward<S, R>(pool: &mut StakePool<S, R>) {
+    fun update_accum_reward(pool: &mut StakePool) {
         let current_time = get_time_for_last_update(pool);
         let new_accum_rewards = accum_rewards_since_last_updated(pool, current_time);
 
@@ -723,8 +664,8 @@ module harvest::stake {
         };
     }
 
-    fun accum_rewards_since_last_updated<S, R>(
-        pool: &StakePool<S, R>, current_time: u64
+    fun accum_rewards_since_last_updated(
+        pool: &StakePool, current_time: u64
     ): u128 {
         let seconds_passed = current_time - pool.last_updated;
         if (seconds_passed == 0) return 0;
@@ -752,11 +693,11 @@ module harvest::stake {
             - user_stake.unobtainable_reward
     }
 
-    fun get_time_for_last_update<S, R>(pool: &StakePool<S, R>): u64 {
+    fun get_time_for_last_update(pool: &StakePool): u64 {
         math64::min(pool.end_timestamp, timestamp::now_seconds())
     }
 
-    fun pool_total_staked_with_boosted<S, R>(pool: &StakePool<S, R>): u128 {
+    fun pool_total_staked_with_boosted(pool: &StakePool): u128 {
         (pool.stake_amount as u128) + pool.total_boosted
     }
 

@@ -6,7 +6,7 @@ module harvest::stake {
     use aptos_std::math64;
     use aptos_std::math128;
     use aptos_std::table;
-    use aptos_framework::account;
+    use aptos_framework::account::{Self, SignerCapability};
     use aptos_framework::timestamp;
     use aptos_token::token::{Self, Token};
     use aptos_framework::fungible_asset::{Self, Metadata, FungibleAsset};
@@ -76,9 +76,22 @@ module harvest::stake {
     const MAX_NFT_BOOST_PERCENT: u128 = 100;
     const ACCUM_REWARD_SCALE: u128 = 1000000000000;
 
+    /// Resource account seed - this makes your resource account address deterministic
+    const RESOURCE_ACCOUNT_SEED: vector<u8> = b"harvest_stake_v1";
+
+    //==============================================================================================
+    // Structs
+    //==============================================================================================
+
+    /// Stores a signing capability for the Resource Account
+    /// This is stored at the module's address (@harvest)
+    struct SignerCapabilityStore has key {
+        signer_capability: SignerCapability
+    }
+
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
     struct StakePool has key {
-        pool_creator: address, // Address of the pool creator (for deriving object address)
+        pool_creator: address, // Address of who created the pool (for tracking)
         stake_metadata: Object<Metadata>,
         reward_metadata: Object<Metadata>,
 
@@ -124,14 +137,50 @@ module harvest::stake {
     }
 
     //==============================================================================================
+    // Initialize Module - Creates Resource Account ONCE
+    //==============================================================================================
+
+    /// This runs ONCE when you deploy the module
+    /// It creates the resource account that will own all pools
+    fun init_module(deployer: &signer) {
+        // Create resource account using deterministic seed
+        let (_, signer_capability) =
+            account::create_resource_account(deployer, RESOURCE_ACCOUNT_SEED);
+
+        // Store the signer capability at YOUR MODULE ADDRESS (@harvest)
+        move_to(deployer, SignerCapabilityStore { signer_capability });
+    }
+
+    //==============================================================================================
+    // Helper Functions - Resource Account Management
+    //==============================================================================================
+
+    /// Get the resource account's address
+    /// This address will own all pool objects!
+    #[view]
+    public fun get_resource_account_address(): address acquires SignerCapabilityStore {
+        let signer_cap_store = borrow_global<SignerCapabilityStore>(@harvest);
+        account::get_signer_capability_address(&signer_cap_store.signer_capability)
+    }
+
+    /// Get the resource account's signer
+    /// Use this when you need the resource account to sign transactions
+    fun get_resource_account_signer(): signer acquires SignerCapabilityStore {
+        let signer_cap_store = borrow_global<SignerCapabilityStore>(@harvest);
+        account::create_signer_with_capability(&signer_cap_store.signer_capability)
+    }
+
+    //==============================================================================================
     // Helper Functions - Get Pool Object
     //==============================================================================================
 
-    /// Creates a unique pool address based on owner and token metadata.
+    /// Creates a unique pool address based on resource account and token metadata.
     /// Each combination of stake and reward tokens gets a unique pool address.
     fun get_pool_address(
-        owner: address, stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
-    ): address {
+        stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
+    ): address acquires SignerCapabilityStore {
+        let resource_account_addr = get_resource_account_address();
+
         // Get token names for unique identification
         let stake_name = fungible_asset::name(stake_metadata);
         let reward_name = fungible_asset::name(reward_metadata);
@@ -142,7 +191,7 @@ module harvest::stake {
         std::vector::append(&mut seed, b"::");
         std::vector::append(&mut seed, *std::string::bytes(&reward_name));
 
-        object::create_object_address(&owner, seed)
+        object::create_object_address(&resource_account_addr, seed)
     }
 
     /// Get pool object signer using ExtendRef
@@ -156,12 +205,24 @@ module harvest::stake {
         object::generate_signer_for_extending(extend_ref)
     }
 
+    //==============================================================================================
+    // Pool Creation
+    //==============================================================================================
+
+    /// Create NFT boost configuration
     public fun create_boost_config(
         collection_owner: address, collection_name: String, boost_percent: u128
     ): NFTBoostConfig {
+        assert!(
+            boost_percent >= MIN_NFT_BOOST_PRECENT
+                && boost_percent <= MAX_NFT_BOOST_PERCENT,
+            ERR_INVALID_BOOST_PERCENT
+        );
         NFTBoostConfig { boost_percent, collection_owner, collection_name }
     }
 
+    /// Register a new staking pool
+    /// All pools are created under the resource account
     public fun register_pool(
         owner: &signer,
         stake_metadata: Object<Metadata>,
@@ -169,15 +230,14 @@ module harvest::stake {
         reward_coins: FungibleAsset,
         duration: u64,
         nft_boost_config: Option<NFTBoostConfig>
-    ) {
+    ) acquires SignerCapabilityStore {
         let owner_addr = signer::address_of(owner);
-        let pool_addr = get_pool_address(owner_addr, stake_metadata, reward_metadata);
+
+        // Get pool address (under resource account)
+        let pool_addr = get_pool_address(stake_metadata, reward_metadata);
 
         // Check pool doesn't exist
-        assert!(
-            !exists<StakePool>(pool_addr),
-            ERR_POOL_ALREADY_EXISTS
-        );
+        assert!(!exists<StakePool>(pool_addr), ERR_POOL_ALREADY_EXISTS);
         assert!(duration > 0, ERR_DURATION_CANNOT_BE_ZERO);
 
         // Calculate reward rate
@@ -206,17 +266,20 @@ module harvest::stake {
         std::vector::append(&mut seed, b"::");
         std::vector::append(&mut seed, *std::string::bytes(&reward_name));
 
-        let constructor_ref = object::create_named_object(owner, seed);
+        // KEY CHANGE: Use RESOURCE ACCOUNT to create pool object!
+        let resource_account_signer = get_resource_account_signer();
+        let constructor_ref = object::create_named_object(
+            &resource_account_signer, seed
+        );
 
         let extend_ref = object::generate_extend_ref(&constructor_ref);
         let object_signer = object::generate_signer(&constructor_ref);
 
-        let pool_addr = get_pool_address(owner_addr, stake_metadata, reward_metadata);
-
+        // Deposit rewards to pool object's primary store
         primary_fungible_store::deposit(pool_addr, reward_coins);
 
         let pool = StakePool {
-            pool_creator: owner_addr,
+            pool_creator: owner_addr, // Track who created it
             stake_metadata,
             reward_metadata,
             reward_per_sec,
@@ -252,7 +315,7 @@ module harvest::stake {
     }
 
     //==============================================================================================
-    // Deposit Rewards - Uses Object Signer
+    // Deposit Rewards
     //==============================================================================================
 
     public fun deposit_reward_coins(
@@ -344,7 +407,7 @@ module harvest::stake {
         // Update tracked amount
         pool.stake_amount = pool.stake_amount + amount;
 
-        //  Deposit to pool object's primary store
+        // Deposit to pool object's primary store
         primary_fungible_store::deposit(pool_addr, coins);
 
         event::emit_event<StakeEvent>(
@@ -404,7 +467,7 @@ module harvest::stake {
             UnstakeEvent { user_address, amount }
         );
 
-        //  Pool object signs and transfers tokens!
+        // Pool object signs and transfers tokens!
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         primary_fungible_store::withdraw(&pool_signer, pool.stake_metadata, amount)
     }
@@ -441,13 +504,13 @@ module harvest::stake {
             HarvestEvent { user_address, amount: earned }
         );
 
-        //  Pool object signs and transfers rewards!
+        // Pool object signs and transfers rewards!
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         primary_fungible_store::withdraw(&pool_signer, pool.reward_metadata, earned)
     }
 
     //==============================================================================================
-    // Boost Functions (similar pattern)
+    // Boost Functions
     //==============================================================================================
 
     public fun boost(
@@ -613,15 +676,20 @@ module harvest::stake {
         primary_fungible_store::withdraw(&pool_signer, pool.reward_metadata, amount)
     }
 
+    //==============================================================================================
+    // View Functions
+    //==============================================================================================
+
+    #[view]
     public fun get_pool_total_stake(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
-        // Query the object's primary store
         let pool = borrow_global<StakePool>(pool_addr);
         primary_fungible_store::balance(pool_addr, pool.stake_metadata)
     }
 
+    #[view]
     public fun get_pool_total_reward(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
@@ -630,25 +698,28 @@ module harvest::stake {
         primary_fungible_store::balance(pool_addr, pool.reward_metadata)
     }
 
+    #[view]
     public fun pool_exists(pool_obj: Object<StakePool>): bool {
         let pool_addr = object::object_address(&pool_obj);
         exists<StakePool>(pool_addr)
     }
 
-    /// Returns the pool object address from creator and token metadata
+    #[view]
+    /// Returns the pool object address from token metadata
+    /// Now uses resource account instead of pool_creator!
     public fun get_pool_address_view(
-        pool_creator: address,
-        stake_metadata: Object<Metadata>,
-        reward_metadata: Object<Metadata>
-    ): address {
-        get_pool_address(pool_creator, stake_metadata, reward_metadata)
+        stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
+    ): address acquires SignerCapabilityStore {
+        get_pool_address(stake_metadata, reward_metadata)
     }
 
+    #[view]
     /// Converts pool address to pool object
     public fun address_to_pool_object(pool_addr: address): Object<StakePool> {
         object::address_to_object<StakePool>(pool_addr)
     }
 
+    #[view]
     /// Get stake metadata from pool
     public fun get_stake_metadata(pool_obj: Object<StakePool>): Object<Metadata> acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
@@ -656,6 +727,7 @@ module harvest::stake {
         pool.stake_metadata
     }
 
+    #[view]
     /// Get reward metadata from pool
     public fun get_reward_metadata(pool_obj: Object<StakePool>): Object<Metadata> acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);

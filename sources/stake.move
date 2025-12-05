@@ -1,4 +1,5 @@
 module harvest::stake {
+
     use std::option::{Self, Option};
     use std::signer;
     use std::string::String;
@@ -6,13 +7,13 @@ module harvest::stake {
     use aptos_std::math64;
     use aptos_std::math128;
     use aptos_std::table;
-    use aptos_framework::account::{Self, SignerCapability};
+    use aptos_framework::account;
     use aptos_framework::timestamp;
     use aptos_token::token::{Self, Token};
     use aptos_framework::fungible_asset::{Self, Metadata, FungibleAsset};
     use aptos_framework::primary_fungible_store;
     use aptos_framework::object::{Self, Object, ExtendRef};
-
+    use harvest::resource_account;
     use harvest::stake_config;
 
     //==============================================================================================
@@ -76,18 +77,9 @@ module harvest::stake {
     const MAX_NFT_BOOST_PERCENT: u128 = 100;
     const ACCUM_REWARD_SCALE: u128 = 1000000000000;
 
-    /// Resource account seed - this makes your resource account address deterministic
-    const RESOURCE_ACCOUNT_SEED: vector<u8> = b"harvest_stake_v1";
-
     //==============================================================================================
     // Structs
     //==============================================================================================
-
-    /// Stores a signing capability for the Resource Account
-    /// This is stored at the module's address (@harvest)
-    struct SignerCapabilityStore has key {
-        signer_capability: SignerCapability
-    }
 
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
     struct StakePool has key {
@@ -137,40 +129,6 @@ module harvest::stake {
     }
 
     //==============================================================================================
-    // Initialize Module - Creates Resource Account ONCE
-    //==============================================================================================
-
-    /// This runs ONCE when you deploy the module
-    /// It creates the resource account that will own all pools
-    fun init_module(deployer: &signer) {
-        // Create resource account using deterministic seed
-        let (_, signer_capability) =
-            account::create_resource_account(deployer, RESOURCE_ACCOUNT_SEED);
-
-        // Store the signer capability at YOUR MODULE ADDRESS (@harvest)
-        move_to(deployer, SignerCapabilityStore { signer_capability });
-    }
-
-    //==============================================================================================
-    // Helper Functions - Resource Account Management
-    //==============================================================================================
-
-    /// Get the resource account's address
-    /// This address will own all pool objects!
-    #[view]
-    public fun get_resource_account_address(): address acquires SignerCapabilityStore {
-        let signer_cap_store = borrow_global<SignerCapabilityStore>(@harvest);
-        account::get_signer_capability_address(&signer_cap_store.signer_capability)
-    }
-
-    /// Get the resource account's signer
-    /// Use this when you need the resource account to sign transactions
-    fun get_resource_account_signer(): signer acquires SignerCapabilityStore {
-        let signer_cap_store = borrow_global<SignerCapabilityStore>(@harvest);
-        account::create_signer_with_capability(&signer_cap_store.signer_capability)
-    }
-
-    //==============================================================================================
     // Helper Functions - Get Pool Object
     //==============================================================================================
 
@@ -178,8 +136,8 @@ module harvest::stake {
     /// Each combination of stake and reward tokens gets a unique pool address.
     fun get_pool_address(
         stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
-    ): address acquires SignerCapabilityStore {
-        let resource_account_addr = get_resource_account_address();
+    ): address {
+        let resource_account_addr = resource_account::get_resource_account_address();
 
         // Get token names for unique identification
         let stake_name = fungible_asset::name(stake_metadata);
@@ -230,7 +188,7 @@ module harvest::stake {
         reward_coins: FungibleAsset,
         duration: u64,
         nft_boost_config: Option<NFTBoostConfig>
-    ) acquires SignerCapabilityStore {
+    ) {
         let owner_addr = signer::address_of(owner);
 
         // Get pool address (under resource account)
@@ -267,7 +225,7 @@ module harvest::stake {
         std::vector::append(&mut seed, *std::string::bytes(&reward_name));
 
         // KEY CHANGE: Use RESOURCE ACCOUNT to create pool object!
-        let resource_account_signer = get_resource_account_signer();
+        let resource_account_signer = resource_account::get_resource_account_signer();
         let constructor_ref = object::create_named_object(
             &resource_account_signer, seed
         );
@@ -709,7 +667,7 @@ module harvest::stake {
     /// Now uses resource account instead of pool_creator!
     public fun get_pool_address_view(
         stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
-    ): address acquires SignerCapabilityStore {
+    ): address {
         get_pool_address(stake_metadata, reward_metadata)
     }
 
@@ -733,6 +691,70 @@ module harvest::stake {
         let pool_addr = object::object_address(&pool_obj);
         let pool = borrow_global<StakePool>(pool_addr);
         pool.reward_metadata
+    }
+
+    #[view]
+    /// Get pool information: (reward_per_sec, accum_reward, last_updated, reward_amount, scale)
+    public fun get_pool_info(
+        pool_obj: Object<StakePool>
+    ): (u64, u128, u64, u64, u128) acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        (
+            pool.reward_per_sec,
+            pool.accum_reward,
+            pool.last_updated,
+            pool.reward_amount,
+            pool.scale
+        )
+    }
+
+    #[view]
+    /// Get pool end timestamp
+    public fun get_end_timestamp(pool_obj: Object<StakePool>): u64 acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        pool.end_timestamp
+    }
+
+    #[view]
+    /// Get user's stake amount in the pool
+    public fun get_user_stake(
+        pool_obj: Object<StakePool>, user_addr: address
+    ): u64 acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        if (table::contains(&pool.stakes, user_addr)) {
+            let user_stake = table::borrow(&pool.stakes, user_addr);
+            user_stake.amount
+        } else { 0 }
+    }
+
+    #[view]
+    /// Get user's unlock time
+    public fun get_unlock_time(
+        pool_obj: Object<StakePool>, user_addr: address
+    ): u64 acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        assert!(table::contains(&pool.stakes, user_addr), ERR_NO_STAKE);
+        let user_stake = table::borrow(&pool.stakes, user_addr);
+        user_stake.unlock_time
+    }
+
+    #[view]
+    /// Check if user has a stake in the pool
+    public fun stake_exists(
+        pool_obj: Object<StakePool>, user_addr: address
+    ): bool acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        table::contains(&pool.stakes, user_addr)
     }
 
     //==============================================================================================

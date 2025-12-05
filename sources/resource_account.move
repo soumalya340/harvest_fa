@@ -1,6 +1,8 @@
 module harvest::resource_account {
     use aptos_framework::account::{Self, SignerCapability};
 
+    friend harvest::stake;
+
     /// Resource account seed - this makes your resource account address deterministic
     const RESOURCE_ACCOUNT_SEED: vector<u8> = b"harvest_stake_v1";
 
@@ -10,7 +12,6 @@ module harvest::resource_account {
         signer_capability: SignerCapability
     }
 
-    /// This runs ONCE when you deploy the module
     /// It creates the resource account that will own all pools
     fun init_module(deployer: &signer) {
         // Create resource account using deterministic seed
@@ -22,17 +23,13 @@ module harvest::resource_account {
     }
 
     /// Get the resource account's address
-    /// This address will own all pool objects!
-    #[view]
-    public fun get_resource_account_address(): address acquires SignerCapabilityStore {
+    public(friend) fun get_resource_account_address(): address acquires SignerCapabilityStore {
         let signer_cap_store = borrow_global<SignerCapabilityStore>(@harvest);
         account::get_signer_capability_address(&signer_cap_store.signer_capability)
     }
 
     /// Get the resource account's signer
-    /// Use this when you need the resource account to sign transactions
-    #[view]
-    public fun get_resource_account_signer(): signer acquires SignerCapabilityStore {
+    public(friend) fun get_resource_account_signer(): signer acquires SignerCapabilityStore {
         let signer_cap_store = borrow_global<SignerCapabilityStore>(@harvest);
         account::create_signer_with_capability(&signer_cap_store.signer_capability)
     }

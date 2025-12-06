@@ -4,7 +4,7 @@ version = "1.1.0"
 authors = []
 
 [addresses]
-harvest = "0x1a7ac6e9638f159b4dab0eead15605d21ed728fc301d1042ae8a5f4f5a010c7d"
+harvest = "0xc16c25e4a37035229ae1e0aaabb83c632ab23313ced30d5a2317d9d652e3992a"
 stake_emergency_admin = "0x1a7ac6e9638f159b4dab0eead15605d21ed728fc301d1042ae8a5f4f5a010c7d"
 
 [dev-addresses]

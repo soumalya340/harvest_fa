@@ -15,6 +15,7 @@ module harvest::stake {
     use aptos_framework::object::{Self, Object, ExtendRef};
     use harvest::resource_account;
     use harvest::stake_config;
+    use aptos_std::table::Table;
 
     //==============================================================================================
     // Error codes
@@ -80,7 +81,6 @@ module harvest::stake {
     //==============================================================================================
     // Structs
     //==============================================================================================
-
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
     struct StakePool has key {
         pool_creator: address, // Address of who created the pool (for tracking)
@@ -126,6 +126,29 @@ module harvest::stake {
         unlock_time: u64,
         nft: Option<Token>,
         boosted_amount: u128
+    }
+
+    struct AllPoolInfos has key {
+        total_count: u128,
+        pool_infos: Table<u128, PoolInfo>
+    }
+
+    struct PoolInfo has store {
+        pool_address: address,
+        stake_coin_name: String,
+        reward_coin_name: String
+    }
+
+    //==============================================================================================
+    // Module Initialization
+    //==============================================================================================
+
+    /// Initialize the module - create the AllPoolInfos resource at the module address
+    fun init_module(deployer: &signer) {
+        move_to(
+            deployer,
+            AllPoolInfos { total_count: 0, pool_infos: table::new() }
+        );
     }
 
     //==============================================================================================
@@ -188,8 +211,15 @@ module harvest::stake {
         reward_coins: FungibleAsset,
         duration: u64,
         nft_boost_config: Option<NFTBoostConfig>
-    ) {
+    ) acquires AllPoolInfos {
         let owner_addr = signer::address_of(owner);
+        // Seed for Pool Object
+        let seed = b"StakePool::";
+
+        let resource_account_signer = resource_account::get_resource_account_signer();
+        let constructor_ref = object::create_named_object(
+            &resource_account_signer, seed
+        );
 
         // Get pool address (under resource account)
         let pool_addr = get_pool_address(stake_metadata, reward_metadata);
@@ -217,18 +247,11 @@ module harvest::stake {
         let scale = stake_scale * reward_scale;
 
         // Create unique seed matching get_pool_address logic
-        let seed = b"StakePool::";
         let stake_name = fungible_asset::name(stake_metadata);
         let reward_name = fungible_asset::name(reward_metadata);
         std::vector::append(&mut seed, *std::string::bytes(&stake_name));
         std::vector::append(&mut seed, b"::");
         std::vector::append(&mut seed, *std::string::bytes(&reward_name));
-
-        // KEY CHANGE: Use RESOURCE ACCOUNT to create pool object!
-        let resource_account_signer = resource_account::get_resource_account_signer();
-        let constructor_ref = object::create_named_object(
-            &resource_account_signer, seed
-        );
 
         let extend_ref = object::generate_extend_ref(&constructor_ref);
         let object_signer = object::generate_signer(&constructor_ref);
@@ -270,6 +293,20 @@ module harvest::stake {
         };
 
         move_to(&object_signer, pool);
+
+        // Store pool info in the registry with incrementing index
+        let all_pool_infos = borrow_global_mut<AllPoolInfos>(@harvest);
+        let pool_index = all_pool_infos.total_count;
+        table::add(
+            &mut all_pool_infos.pool_infos,
+            pool_index,
+            PoolInfo {
+                pool_address: pool_addr,
+                stake_coin_name: stake_name,
+                reward_coin_name: reward_name
+            }
+        );
+        all_pool_infos.total_count = all_pool_infos.total_count + 1;
     }
 
     //==============================================================================================
@@ -757,6 +794,40 @@ module harvest::stake {
         table::contains(&pool.stakes, user_addr)
     }
 
+    #[view]
+    /// Get pool info from registry by index
+    public fun get_pool_info_from_registry(
+        pool_index: u128
+    ): (address, String, String) acquires AllPoolInfos {
+        let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
+        assert!(table::contains(&all_pool_infos.pool_infos, pool_index), ERR_NO_POOL);
+        let pool_info = table::borrow(&all_pool_infos.pool_infos, pool_index);
+        (pool_info.pool_address, pool_info.stake_coin_name, pool_info.reward_coin_name)
+    }
+
+    #[view]
+    /// Check if a pool exists in the registry by index
+    public fun pool_exists_in_registry(pool_index: u128): bool acquires AllPoolInfos {
+        let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
+        table::contains(&all_pool_infos.pool_infos, pool_index)
+    }
+
+    #[view]
+    /// Get total number of pools registered
+    public fun get_total_pools_count(): u128 acquires AllPoolInfos {
+        let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
+        all_pool_infos.total_count
+    }
+
+    #[view]
+    /// Get pool address by index
+    public fun get_pool_address_by_index(pool_index: u128): address acquires AllPoolInfos {
+        let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
+        assert!(table::contains(&all_pool_infos.pool_infos, pool_index), ERR_NO_POOL);
+        let pool_info = table::borrow(&all_pool_infos.pool_infos, pool_index);
+        pool_info.pool_address
+    }
+
     //==============================================================================================
     // Private Helper Functions
     //==============================================================================================
@@ -777,7 +848,7 @@ module harvest::stake {
         pool.last_updated = current_time;
 
         if (new_accum_rewards != 0) {
-            pool.accum_reward = pool.accum_reward + new_accum_rewards;
+            pool.accum_reward += new_accum_rewards;
         };
     }
 
@@ -799,8 +870,8 @@ module harvest::stake {
         accum_reward: u128, scale: u128, user_stake: &mut UserStake
     ) {
         let earned = user_earned_since_last_update(accum_reward, scale, user_stake);
-        user_stake.earned_reward = user_stake.earned_reward + (earned as u64);
-        user_stake.unobtainable_reward = user_stake.unobtainable_reward + earned;
+        user_stake.earned_reward +=(earned as u64);
+        user_stake.unobtainable_reward += earned;
     }
 
     fun user_earned_since_last_update(

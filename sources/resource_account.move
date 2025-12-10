@@ -4,7 +4,7 @@ module harvest::resource_account {
     friend harvest::stake;
 
     /// Resource account seed - this makes your resource account address deterministic
-    const RESOURCE_ACCOUNT_SEED: vector<u8> = b"harvest_stake_v1";
+    const RESOURCE_ACCOUNT_SEED: vector<u8> = b"harvest_stake_v2";
 
     /// Stores a signing capability for the Resource Account
     /// This is stored at the module's address (@harvest)

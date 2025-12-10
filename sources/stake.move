@@ -3,70 +3,57 @@ module harvest::stake {
     use std::option::{Self, Option};
     use std::signer;
     use std::string::String;
+    use aptos_framework::string_utils;
     use aptos_std::event::{Self, EventHandle};
     use aptos_std::math64;
     use aptos_std::math128;
     use aptos_std::table;
     use aptos_framework::account;
     use aptos_framework::timestamp;
-    use aptos_token::token::{Self, Token};
+
+    // OLD NFT Standard (v1)
+    use aptos_token::token::{Self, Token as LegacyToken};
+
+    // NEW NFT Standard (v2) - Digital Assets
+    use aptos_token_objects::token::Token as DigitalAssetToken;
+    use aptos_token_objects::token as da_token; // da = digital asset
+
     use aptos_framework::fungible_asset::{Self, Metadata, FungibleAsset};
     use aptos_framework::primary_fungible_store;
     use aptos_framework::object::{Self, Object, ExtendRef};
-    use harvest::resource_account;
-    use harvest::stake_config;
     use aptos_std::table::Table;
+
+    use harvest::resource_account as resource_account_module;
+    use harvest::stake_config as stake_config_module;
 
     //==============================================================================================
     // Error codes
     //==============================================================================================
 
-    /// Pool does not exist at the specified address
     const ERR_NO_POOL: u64 = 100;
-    /// Pool already exists for this stake and reward token pair
     const ERR_POOL_ALREADY_EXISTS: u64 = 101;
-    /// Reward per second cannot be zero (reward amount / duration must be > 0)
     const ERR_REWARD_CANNOT_BE_ZERO: u64 = 102;
-    /// User has no stake in this pool
     const ERR_NO_STAKE: u64 = 103;
-    /// User does not have enough staked balance for this operation
     const ERR_NOT_ENOUGH_S_BALANCE: u64 = 104;
-    /// Amount must be greater than zero
     const ERR_AMOUNT_CANNOT_BE_ZERO: u64 = 105;
-    /// No rewards available to harvest
     const ERR_NOTHING_TO_HARVEST: u64 = 106;
-    /// Cannot unstake before unlock time (1 week lock period)
     const ERR_TOO_EARLY_UNSTAKE: u64 = 108;
-    /// Pool is in emergency mode, normal operations are disabled
     const ERR_EMERGENCY: u64 = 109;
-    /// Pool is not in emergency mode, cannot perform emergency operations
     const ERR_NO_EMERGENCY: u64 = 110;
-    /// Caller does not have permission to enable emergency mode
     const ERR_NOT_ENOUGH_PERMISSIONS_FOR_EMERGENCY: u64 = 111;
-    /// Duration must be greater than zero
     const ERR_DURATION_CANNOT_BE_ZERO: u64 = 112;
-    /// Harvest period has ended, cannot stake or add rewards
     const ERR_HARVEST_FINISHED: u64 = 113;
-    /// Cannot withdraw rewards yet, must wait for withdrawal period
     const ERR_NOT_WITHDRAW_PERIOD: u64 = 114;
-    /// Caller is not the treasury admin
     const ERR_NOT_TREASURY: u64 = 115;
-    /// NFT collection is not configured
-    const ERR_NO_COLLECTION: u64 = 116;
-    /// Boost percent is invalid (must be between 1 and 100)
     const ERR_INVALID_BOOST_PERCENT: u64 = 117;
-    /// Pool does not have NFT boost enabled
     const ERR_NON_BOOST_POOL: u64 = 118;
-    /// User already has an NFT boost applied
     const ERR_ALREADY_BOOSTED: u64 = 119;
-    /// NFT collection does not match the pool's configured collection
     const ERR_WRONG_TOKEN_COLLECTION: u64 = 120;
-    /// User does not have an NFT boost to remove
     const ERR_NO_BOOST: u64 = 121;
-    /// NFT amount must be exactly 1
     const ERR_NFT_AMOUNT_MORE_THAN_ONE: u64 = 122;
-    /// Reward token decimals must be 10 or less for calculation safety
-    const ERR_INVALID_REWARD_DECIMALS: u64 = 123;
+    const ERR_WRONG_VERSION: u64 = 124;
+    const ERR_NOT_OWNER: u64 = 126;
+    const ERR_INVALID_REWARD_DECIMALS: u64 = 127;
 
     //==============================================================================================
     // Constants
@@ -78,33 +65,32 @@ module harvest::stake {
     const MAX_NFT_BOOST_PERCENT: u128 = 100;
     const ACCUM_REWARD_SCALE: u128 = 1000000000000;
 
+    /// NFT Version Constants
+    const NFT_VERSION_V1: u64 = 1; // Old Token standard
+    const NFT_VERSION_V2: u64 = 2; // New Digital Assets standard
+
     //==============================================================================================
     // Structs
     //==============================================================================================
+
     #[resource_group_member(group = aptos_framework::object::ObjectGroup)]
     struct StakePool has key {
-        pool_creator: address, // Address of who created the pool (for tracking)
+        pool_creator: address,
         stake_metadata: Object<Metadata>,
         reward_metadata: Object<Metadata>,
-
-        // Pool parameters
         reward_per_sec: u64,
         accum_reward: u128,
         last_updated: u64,
         start_timestamp: u64,
         end_timestamp: u64,
-
-        // User stakes tracking
         stakes: table::Table<address, UserStake>,
-        stake_amount: u64, // Total staked in this pool
-        reward_amount: u64, // Total rewards in this pool
+        stake_amount: u64,
+        reward_amount: u64,
         extend_ref: ExtendRef,
         scale: u128,
         total_boosted: u128,
         nft_boost_config: Option<NFTBoostConfig>,
         emergency_locked: bool,
-
-        // Events
         stake_events: EventHandle<StakeEvent>,
         unstake_events: EventHandle<UnstakeEvent>,
         deposit_events: EventHandle<DepositRewardEvent>,
@@ -113,18 +99,25 @@ module harvest::stake {
         remove_boost_events: EventHandle<RemoveBoostEvent>
     }
 
+    /// NFT Boost Configuration
+    /// version: 1 = old Token standard, 2 = new Digital Assets standard
     struct NFTBoostConfig has store {
         boost_percent: u128,
-        collection_owner: address,
-        collection_name: String
+        version: u64,
+        collection_identifier: address, // v1: creator address, v2: collection object address
+        collection_name: String // Used for v1 validation, stored for reference in v2
     }
 
+    /// User's stake information
     struct UserStake has store {
         amount: u64,
         unobtainable_reward: u128,
         earned_reward: u64,
         unlock_time: u64,
-        nft: Option<Token>,
+        // OLD standard NFT (stored directly)
+        nft_v1: Option<LegacyToken>,
+        // NEW standard NFT (stored as object address, NFT transferred to pool)
+        nft_v2_address: Option<address>,
         boosted_amount: u128
     }
 
@@ -143,7 +136,6 @@ module harvest::stake {
     // Module Initialization
     //==============================================================================================
 
-    /// Initialize the module - create the AllPoolInfos resource at the module address
     fun init_module(deployer: &signer) {
         move_to(
             deployer,
@@ -152,36 +144,37 @@ module harvest::stake {
     }
 
     //==============================================================================================
-    // Helper Functions - Get Pool Object
+    // Helper Functions
     //==============================================================================================
 
-    /// Creates a unique pool address based on resource account and token metadata.
-    /// Each combination of stake and reward tokens gets a unique pool address.
+    fun get_seed(
+        stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
+    ): (vector<u8>, String, String) {
+        let seed = b"StakePool::";
+        let stake_addr = object::object_address(&stake_metadata);
+        let reward_addr = object::object_address(&reward_metadata);
+        let reward_addr_string = string_utils::to_string(&stake_addr);
+        let stake_addr_string = string_utils::to_string(&reward_addr);
+        std::vector::append(&mut seed, *std::string::bytes(&reward_addr_string));
+        std::vector::append(&mut seed, b"::");
+        std::vector::append(&mut seed, *std::string::bytes(&stake_addr_string));
+        (seed, stake_addr_string, reward_addr_string)
+    }
+
     fun get_pool_address(
         stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
     ): address {
-        let resource_account_addr = resource_account::get_resource_account_address();
-
-        // Get token names for unique identification
-        let stake_name = fungible_asset::name(stake_metadata);
-        let reward_name = fungible_asset::name(reward_metadata);
-
-        // Combine into unique seed: "StakePool::<stake_name>::<reward_name>"
-        let seed = b"StakePool::";
-        std::vector::append(&mut seed, *std::string::bytes(&stake_name));
-        std::vector::append(&mut seed, b"::");
-        std::vector::append(&mut seed, *std::string::bytes(&reward_name));
-
+        let resource_account_addr =
+            resource_account_module::get_resource_account_address();
+        let (seed, _, _) = get_seed(stake_metadata, reward_metadata);
         object::create_object_address(&resource_account_addr, seed)
     }
 
-    /// Get pool object signer using ExtendRef
     fun get_pool_signer(pool_addr: address): signer acquires StakePool {
         let pool = borrow_global<StakePool>(pool_addr);
         object::generate_signer_for_extending(&pool.extend_ref)
     }
 
-    /// Internal version that takes ExtendRef directly
     fun get_pool_signer_internal(extend_ref: &ExtendRef): signer {
         object::generate_signer_for_extending(extend_ref)
     }
@@ -191,19 +184,29 @@ module harvest::stake {
     //==============================================================================================
 
     /// Create NFT boost configuration
+    /// version: 1 for old Token standard, 2 for new Digital Assets standard
+    /// collection_identifier:
+    ///   - For v1: the collection creator's address
+    ///   - For v2: the collection object's address
     public fun create_boost_config(
-        collection_owner: address, collection_name: String, boost_percent: u128
+        version: u64,
+        collection_identifier: address,
+        collection_name: String,
+        boost_percent: u128
     ): NFTBoostConfig {
+        assert!(
+            version == NFT_VERSION_V1 || version == NFT_VERSION_V2,
+            ERR_WRONG_VERSION
+        );
         assert!(
             boost_percent >= MIN_NFT_BOOST_PRECENT
                 && boost_percent <= MAX_NFT_BOOST_PERCENT,
             ERR_INVALID_BOOST_PERCENT
         );
-        NFTBoostConfig { boost_percent, collection_owner, collection_name }
+        NFTBoostConfig { boost_percent, version, collection_identifier, collection_name }
     }
 
     /// Register a new staking pool
-    /// All pools are created under the resource account
     public fun register_pool(
         owner: &signer,
         stake_metadata: Object<Metadata>,
@@ -213,22 +216,21 @@ module harvest::stake {
         nft_boost_config: Option<NFTBoostConfig>
     ) acquires AllPoolInfos {
         let owner_addr = signer::address_of(owner);
-        // Seed for Pool Object
-        let seed = b"StakePool::";
+        let resource_account_signer =
+            resource_account_module::get_resource_account_signer();
 
-        let resource_account_signer = resource_account::get_resource_account_signer();
+        // Create unique seed
+        let (seed, stake_addr_string, reward_addr_string) =
+            get_seed(stake_metadata, reward_metadata);
+
         let constructor_ref = object::create_named_object(
             &resource_account_signer, seed
         );
-
-        // Get pool address (under resource account)
         let pool_addr = get_pool_address(stake_metadata, reward_metadata);
 
-        // Check pool doesn't exist
         assert!(!exists<StakePool>(pool_addr), ERR_POOL_ALREADY_EXISTS);
         assert!(duration > 0, ERR_DURATION_CANNOT_BE_ZERO);
 
-        // Calculate reward rate
         let reward_amount = fungible_asset::amount(&reward_coins);
         let reward_per_sec = reward_amount / duration;
         assert!(reward_per_sec > 0, ERR_REWARD_CANNOT_BE_ZERO);
@@ -246,21 +248,14 @@ module harvest::stake {
         let stake_scale = math128::pow(10, (stake_decimals as u128));
         let scale = stake_scale * reward_scale;
 
-        // Create unique seed matching get_pool_address logic
-        let stake_name = fungible_asset::name(stake_metadata);
-        let reward_name = fungible_asset::name(reward_metadata);
-        std::vector::append(&mut seed, *std::string::bytes(&stake_name));
-        std::vector::append(&mut seed, b"::");
-        std::vector::append(&mut seed, *std::string::bytes(&reward_name));
-
         let extend_ref = object::generate_extend_ref(&constructor_ref);
         let object_signer = object::generate_signer(&constructor_ref);
 
-        // Deposit rewards to pool object's primary store
+        // Deposit rewards to pool
         primary_fungible_store::deposit(pool_addr, reward_coins);
 
         let pool = StakePool {
-            pool_creator: owner_addr, // Track who created it
+            pool_creator: owner_addr,
             stake_metadata,
             reward_metadata,
             reward_per_sec,
@@ -269,19 +264,13 @@ module harvest::stake {
             start_timestamp: current_time,
             end_timestamp,
             stakes: table::new(),
-
-            // Track amounts instead of store addresses
             stake_amount: 0,
             reward_amount,
-
-            // Store ExtendRef for signing later
             extend_ref,
             scale,
             total_boosted: 0,
             nft_boost_config,
             emergency_locked: false,
-
-            // Events
             stake_events: account::new_event_handle<StakeEvent>(&object_signer),
             unstake_events: account::new_event_handle<UnstakeEvent>(&object_signer),
             deposit_events: account::new_event_handle<DepositRewardEvent>(&object_signer),
@@ -294,7 +283,7 @@ module harvest::stake {
 
         move_to(&object_signer, pool);
 
-        // Store pool info in the registry with incrementing index
+        // Register in pool infos
         let all_pool_infos = borrow_global_mut<AllPoolInfos>(@harvest);
         let pool_index = all_pool_infos.total_count;
         table::add(
@@ -302,8 +291,8 @@ module harvest::stake {
             pool_index,
             PoolInfo {
                 pool_address: pool_addr,
-                stake_coin_name: stake_name,
-                reward_coin_name: reward_name
+                stake_coin_name: stake_addr_string,
+                reward_coin_name: reward_addr_string
             }
         );
         all_pool_infos.total_count = all_pool_infos.total_count + 1;
@@ -332,7 +321,6 @@ module harvest::stake {
         pool.end_timestamp = pool.end_timestamp + additional_duration;
         pool.reward_amount = pool.reward_amount + amount;
 
-        // Deposit rewards to pool object's primary store
         primary_fungible_store::deposit(pool_addr, coins);
 
         event::emit_event<DepositRewardEvent>(
@@ -346,7 +334,7 @@ module harvest::stake {
     }
 
     //==============================================================================================
-    // Stake - User Deposits Tokens
+    // Stake
     //==============================================================================================
 
     public fun stake(
@@ -374,10 +362,10 @@ module harvest::stake {
                 unobtainable_reward: 0,
                 earned_reward: 0,
                 unlock_time: current_time + WEEK_IN_SECONDS,
-                nft: option::none(),
+                nft_v1: option::none(),
+                nft_v2_address: option::none(),
                 boosted_amount: 0
             };
-
             new_stake.unobtainable_reward = (accum_reward * (amount as u128)) / pool.scale;
             table::add(&mut pool.stakes, user_address, new_stake);
         } else {
@@ -386,7 +374,9 @@ module harvest::stake {
 
             user_stake.amount = user_stake.amount + amount;
 
-            if (option::is_some(&user_stake.nft)) {
+            // Recalculate boost if user has NFT
+            if (option::is_some(&user_stake.nft_v1)
+                || option::is_some(&user_stake.nft_v2_address)) {
                 let boost_percent = option::borrow(&pool.nft_boost_config).boost_percent;
                 pool.total_boosted = pool.total_boosted - user_stake.boosted_amount;
                 user_stake.boosted_amount = ((user_stake.amount as u128) * boost_percent)
@@ -399,10 +389,7 @@ module harvest::stake {
             user_stake.unlock_time = current_time + WEEK_IN_SECONDS;
         };
 
-        // Update tracked amount
         pool.stake_amount = pool.stake_amount + amount;
-
-        // Deposit to pool object's primary store
         primary_fungible_store::deposit(pool_addr, coins);
 
         event::emit_event<StakeEvent>(
@@ -412,7 +399,7 @@ module harvest::stake {
     }
 
     //==============================================================================================
-    // Unstake - Withdraw Tokens
+    // Unstake
     //==============================================================================================
 
     public fun unstake(
@@ -443,7 +430,9 @@ module harvest::stake {
 
         user_stake.amount = user_stake.amount - amount;
 
-        if (option::is_some(&user_stake.nft)) {
+        // Recalculate boost
+        if (option::is_some(&user_stake.nft_v1)
+            || option::is_some(&user_stake.nft_v2_address)) {
             let boost_percent = option::borrow(&pool.nft_boost_config).boost_percent;
             pool.total_boosted = pool.total_boosted - user_stake.boosted_amount;
             user_stake.boosted_amount = ((user_stake.amount as u128) * boost_percent) /
@@ -454,7 +443,6 @@ module harvest::stake {
         user_stake.unobtainable_reward =
             (pool.accum_reward * user_stake_amount_with_boosted(user_stake)) / pool.scale;
 
-        // Update tracked amount
         pool.stake_amount = pool.stake_amount - amount;
 
         event::emit_event<UnstakeEvent>(
@@ -462,13 +450,12 @@ module harvest::stake {
             UnstakeEvent { user_address, amount }
         );
 
-        // Pool object signs and transfers tokens!
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         primary_fungible_store::withdraw(&pool_signer, pool.stake_metadata, amount)
     }
 
     //==============================================================================================
-    // Harvest - Claim Rewards
+    // Harvest
     //==============================================================================================
 
     public fun harvest(user: &signer, pool_obj: Object<StakePool>): FungibleAsset acquires StakePool {
@@ -490,8 +477,6 @@ module harvest::stake {
         assert!(earned > 0, ERR_NOTHING_TO_HARVEST);
 
         user_stake.earned_reward = 0;
-
-        // Update tracked amount
         pool.reward_amount = pool.reward_amount - earned;
 
         event::emit_event<HarvestEvent>(
@@ -499,17 +484,19 @@ module harvest::stake {
             HarvestEvent { user_address, amount: earned }
         );
 
-        // Pool object signs and transfers rewards!
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         primary_fungible_store::withdraw(&pool_signer, pool.reward_metadata, earned)
     }
 
     //==============================================================================================
-    // Boost Functions
+    // Boost Functions - DUAL NFT STANDARD SUPPORT
     //==============================================================================================
 
-    public fun boost(
-        user: &signer, pool_obj: Object<StakePool>, nft: Token
+    /// Boost with OLD Token standard (v1)
+    /// The Token struct is stored directly in UserStake
+    /// Boost with OLD Token standard (v1)
+    public fun boost_v1(
+        user: &signer, pool_obj: Object<StakePool>, nft: LegacyToken
     ) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
@@ -518,9 +505,24 @@ module harvest::stake {
         assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
         assert!(option::is_some(&pool.nft_boost_config), ERR_NON_BOOST_POOL);
 
+        //  FIX: Extract ALL needed values from config FIRST
+        let (boost_percent, version, collection_owner, collection_name) = {
+            let config = option::borrow(&pool.nft_boost_config);
+            (
+                config.boost_percent,
+                config.version,
+                config.collection_identifier,
+                config.collection_name
+            )
+        }; // ← config borrow is DROPPED here!
+
+        // Now validate version
+        assert!(version == NFT_VERSION_V1, ERR_WRONG_VERSION);
+
         let user_address = signer::address_of(user);
         assert!(table::contains(&pool.stakes, user_address), ERR_NO_STAKE);
 
+        // Validate NFT
         let token_amount = token::get_token_amount(&nft);
         assert!(token_amount == 1, ERR_NFT_AMOUNT_MORE_THAN_ONE);
 
@@ -528,15 +530,10 @@ module harvest::stake {
         let (token_collection_owner, token_collection_name, _, _) =
             token::get_token_id_fields(&token_id);
 
-        let params = option::borrow(&pool.nft_boost_config);
-        let boost_percent = params.boost_percent;
-        let collection_owner = params.collection_owner;
-        let collection_name = params.collection_name;
-
         assert!(token_collection_owner == collection_owner, ERR_WRONG_TOKEN_COLLECTION);
         assert!(
-            std::string::bytes(&token_collection_name)
-                == std::string::bytes(&collection_name),
+            *std::string::bytes(&token_collection_name)
+                == *std::string::bytes(&collection_name),
             ERR_WRONG_TOKEN_COLLECTION
         );
 
@@ -545,23 +542,96 @@ module harvest::stake {
         let user_stake = table::borrow_mut(&mut pool.stakes, user_address);
         update_user_earnings(pool.accum_reward, pool.scale, user_stake);
 
-        assert!(option::is_none(&user_stake.nft), ERR_ALREADY_BOOSTED);
+        // Check not already boosted
+        assert!(option::is_none(&user_stake.nft_v1), ERR_ALREADY_BOOSTED);
+        assert!(option::is_none(&user_stake.nft_v2_address), ERR_ALREADY_BOOSTED);
 
-        option::fill(&mut user_stake.nft, nft);
+        // Store NFT
+        option::fill(&mut user_stake.nft_v1, nft);
 
+        // Calculate boost using extracted boost_percent
         user_stake.boosted_amount = ((user_stake.amount as u128) * boost_percent) / 100;
         pool.total_boosted = pool.total_boosted + user_stake.boosted_amount;
 
         user_stake.unobtainable_reward =
             (pool.accum_reward * user_stake_amount_with_boosted(user_stake)) / pool.scale;
 
-        event::emit_event(
-            &mut pool.boost_events,
-            BoostEvent { user_address }
-        );
+        event::emit_event(&mut pool.boost_events, BoostEvent { user_address });
     }
 
-    public fun remove_boost(user: &signer, pool_obj: Object<StakePool>): Token acquires StakePool {
+    /// Boost with NEW Digital Assets standard (v2)
+    /// The NFT object is transferred to the pool and address is stored
+    /// Boost with NEW Digital Assets standard (v2)
+    public fun boost_v2(
+        user: &signer, pool_obj: Object<StakePool>, nft_obj: Object<DigitalAssetToken>
+    ) acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+
+        let pool = borrow_global_mut<StakePool>(pool_addr);
+        assert!(!is_emergency_inner(pool), ERR_EMERGENCY);
+        assert!(option::is_some(&pool.nft_boost_config), ERR_NON_BOOST_POOL);
+
+        //  FIX: Extract ALL needed values from config FIRST
+        let (boost_percent, version, collection_identifier) = {
+            let config = option::borrow(&pool.nft_boost_config);
+            (config.boost_percent, config.version, config.collection_identifier)
+        }; // ← config borrow is DROPPED here!
+
+        // Validate version
+        assert!(version == NFT_VERSION_V2, ERR_WRONG_VERSION);
+
+        let user_address = signer::address_of(user);
+        assert!(table::contains(&pool.stakes, user_address), ERR_NO_STAKE);
+
+        // Verify user owns the NFT
+        assert!(object::is_owner(nft_obj, user_address), ERR_NOT_OWNER);
+
+        // Validate collection
+        let collection_obj = da_token::collection_object(nft_obj);
+        let collection_addr = object::object_address(&collection_obj);
+        assert!(collection_addr == collection_identifier, ERR_WRONG_TOKEN_COLLECTION);
+
+        //  NOW we can call update_accum_reward - no active borrows!
+        update_accum_reward(pool);
+
+        let nft_addr = object::object_address(&nft_obj);
+
+        //  Use extracted boost_percent
+        let user_stake = table::borrow_mut(&mut pool.stakes, user_address);
+        update_user_earnings(pool.accum_reward, pool.scale, user_stake);
+
+        // Check not already boosted
+        assert!(option::is_none(&user_stake.nft_v1), ERR_ALREADY_BOOSTED);
+        assert!(option::is_none(&user_stake.nft_v2_address), ERR_ALREADY_BOOSTED);
+
+        // Transfer NFT to pool
+        object::transfer(user, nft_obj, pool_addr);
+
+        // Store NFT address
+        option::fill(&mut user_stake.nft_v2_address, nft_addr);
+
+        // Calculate boost using extracted boost_percent
+        user_stake.boosted_amount = ((user_stake.amount as u128) * boost_percent) / 100;
+        pool.total_boosted = pool.total_boosted + user_stake.boosted_amount;
+
+        user_stake.unobtainable_reward =
+            (pool.accum_reward * user_stake_amount_with_boosted(user_stake)) / pool.scale;
+
+        event::emit_event(&mut pool.boost_events, BoostEvent { user_address });
+    }
+
+    /// Remove boost - works for BOTH v1 and v2
+    /// Returns: (Option<LegacyToken>, Option<address>)
+    /// - For v1: returns the Token, second is none
+    /// - For v2: first is none, returns the NFT address (already transferred back to user)
+    /// /// Remove NFT boost and return the NFT
+    /// Returns: (Option<LegacyToken>, Option<address>)
+    ///   - If V1 boost: (Some(token), None)
+    ///   - If V2 boost: (None, Some(nft_address)) - NFT is transferred back to user
+    public fun remove_boost(
+        user: &signer, pool_obj: Object<StakePool>
+    ): (Option<LegacyToken>, Option<address>) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
@@ -571,28 +641,64 @@ module harvest::stake {
         let user_address = signer::address_of(user);
         assert!(table::contains(&pool.stakes, user_address), ERR_NO_STAKE);
 
+        // Check which type of boost exists FIRST (before any mutable borrows)
+        let has_v1 = {
+            let user_stake = table::borrow(&pool.stakes, user_address);
+            option::is_some(&user_stake.nft_v1)
+        };
+        let has_v2 = {
+            let user_stake = table::borrow(&pool.stakes, user_address);
+            option::is_some(&user_stake.nft_v2_address)
+        };
+
+        // Must have at least one type of boost
+        assert!(has_v1 || has_v2, ERR_NO_BOOST);
+
+        // Update accumulated rewards
         update_accum_reward(pool);
 
-        let user_stake = table::borrow_mut(&mut pool.stakes, user_address);
-        assert!(option::is_some(&user_stake.nft), ERR_NO_BOOST);
+        // Update user earnings and clear boost
+        {
+            let user_stake = table::borrow_mut(&mut pool.stakes, user_address);
+            update_user_earnings(pool.accum_reward, pool.scale, user_stake);
 
-        update_user_earnings(pool.accum_reward, pool.scale, user_stake);
+            // Remove boost from total
+            pool.total_boosted = pool.total_boosted - user_stake.boosted_amount;
+            user_stake.boosted_amount = 0;
 
-        pool.total_boosted = pool.total_boosted - user_stake.boosted_amount;
-        user_stake.boosted_amount = 0;
+            user_stake.unobtainable_reward =
+                (pool.accum_reward * user_stake_amount_with_boosted(user_stake))
+                    / pool.scale;
+        };
 
-        user_stake.unobtainable_reward =
-            (pool.accum_reward * user_stake_amount_with_boosted(user_stake)) / pool.scale;
-
+        // Emit event
         event::emit_event(
-            &mut pool.remove_boost_events,
-            RemoveBoostEvent { user_address }
+            &mut pool.remove_boost_events, RemoveBoostEvent { user_address }
         );
 
-        option::extract(&mut user_stake.nft)
+        //  Handle V1 - extract and return Token
+        if (has_v1) {
+            let user_stake = table::borrow_mut(&mut pool.stakes, user_address);
+            let nft = option::extract(&mut user_stake.nft_v1);
+            return (option::some(nft), option::none<address>())
+        };
+
+        //  Handle V2 - transfer NFT back to user, return address
+        // Extract address first
+        let nft_addr = {
+            let user_stake = table::borrow_mut(&mut pool.stakes, user_address);
+            option::extract(&mut user_stake.nft_v2_address)
+        };
+
+        // Transfer NFT back to user
+        let nft_obj = object::address_to_object<DigitalAssetToken>(nft_addr);
+        let pool_signer = get_pool_signer_internal(&pool.extend_ref);
+        object::transfer(&pool_signer, nft_obj, user_address);
+
+        (option::none<LegacyToken>(), option::some(nft_addr))
     }
 
-    //==============================================================================================
+    //==============================================================================
     // Emergency Functions
     //==============================================================================================
 
@@ -602,7 +708,8 @@ module harvest::stake {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
         assert!(
-            signer::address_of(admin) == stake_config::get_emergency_admin_address(),
+            signer::address_of(admin)
+                == stake_config_module::get_emergency_admin_address(),
             ERR_NOT_ENOUGH_PERMISSIONS_FOR_EMERGENCY
         );
 
@@ -612,9 +719,10 @@ module harvest::stake {
         pool.emergency_locked = true;
     }
 
+    /// Emergency unstake - returns stake coins and any NFT
     public fun emergency_unstake(
         user: &signer, pool_obj: Object<StakePool>
-    ): (FungibleAsset, Option<Token>) acquires StakePool {
+    ): (FungibleAsset, Option<LegacyToken>, Option<address>) acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
 
@@ -630,19 +738,29 @@ module harvest::stake {
             unobtainable_reward: _,
             earned_reward: _,
             unlock_time: _,
-            nft,
+            nft_v1,
+            nft_v2_address,
             boosted_amount: _
         } = user_stake;
 
-        // Update tracked amount
         pool.stake_amount = pool.stake_amount - amount;
 
-        // Pool object signs withdrawal
+        // Handle v2 NFT transfer back if exists
+        let nft_v2_result = option::none();
+        if (option::is_some(&nft_v2_address)) {
+            let nft_addr = option::extract(&mut nft_v2_address);
+            let nft_obj = object::address_to_object<DigitalAssetToken>(nft_addr);
+            let pool_signer = get_pool_signer_internal(&pool.extend_ref);
+            object::transfer(&pool_signer, nft_obj, user_addr);
+            nft_v2_result = option::some(nft_addr);
+        };
+        option::destroy_none(nft_v2_address);
+
         let pool_signer = get_pool_signer_internal(&pool.extend_ref);
         let coins =
             primary_fungible_store::withdraw(&pool_signer, pool.stake_metadata, amount);
 
-        (coins, nft)
+        (coins, nft_v1, nft_v2_result)
     }
 
     public fun withdraw_to_treasury(
@@ -651,7 +769,8 @@ module harvest::stake {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
         assert!(
-            signer::address_of(treasury) == stake_config::get_treasury_admin_address(),
+            signer::address_of(treasury)
+                == stake_config_module::get_treasury_admin_address(),
             ERR_NOT_TREASURY
         );
 
@@ -679,7 +798,6 @@ module harvest::stake {
     public fun get_pool_total_stake(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
-
         let pool = borrow_global<StakePool>(pool_addr);
         primary_fungible_store::balance(pool_addr, pool.stake_metadata)
     }
@@ -688,7 +806,6 @@ module harvest::stake {
     public fun get_pool_total_reward(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
-
         let pool = borrow_global<StakePool>(pool_addr);
         primary_fungible_store::balance(pool_addr, pool.reward_metadata)
     }
@@ -700,8 +817,6 @@ module harvest::stake {
     }
 
     #[view]
-    /// Returns the pool object address from token metadata
-    /// Now uses resource account instead of pool_creator!
     public fun get_pool_address_view(
         stake_metadata: Object<Metadata>, reward_metadata: Object<Metadata>
     ): address {
@@ -709,13 +824,11 @@ module harvest::stake {
     }
 
     #[view]
-    /// Converts pool address to pool object
     public fun address_to_pool_object(pool_addr: address): Object<StakePool> {
         object::address_to_object<StakePool>(pool_addr)
     }
 
     #[view]
-    /// Get stake metadata from pool
     public fun get_stake_metadata(pool_obj: Object<StakePool>): Object<Metadata> acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         let pool = borrow_global<StakePool>(pool_addr);
@@ -723,7 +836,6 @@ module harvest::stake {
     }
 
     #[view]
-    /// Get reward metadata from pool
     public fun get_reward_metadata(pool_obj: Object<StakePool>): Object<Metadata> acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         let pool = borrow_global<StakePool>(pool_addr);
@@ -731,7 +843,6 @@ module harvest::stake {
     }
 
     #[view]
-    /// Get pool information: (reward_per_sec, accum_reward, last_updated, reward_amount, scale)
     public fun get_pool_info(
         pool_obj: Object<StakePool>
     ): (u64, u128, u64, u64, u128) acquires StakePool {
@@ -748,16 +859,13 @@ module harvest::stake {
     }
 
     #[view]
-    /// Get pool end timestamp
     public fun get_end_timestamp(pool_obj: Object<StakePool>): u64 acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
-        let pool = borrow_global<StakePool>(pool_addr);
-        pool.end_timestamp
+        borrow_global<StakePool>(pool_addr).end_timestamp
     }
 
     #[view]
-    /// Get user's stake amount in the pool
     public fun get_user_stake(
         pool_obj: Object<StakePool>, user_addr: address
     ): u64 acquires StakePool {
@@ -765,13 +873,11 @@ module harvest::stake {
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
         let pool = borrow_global<StakePool>(pool_addr);
         if (table::contains(&pool.stakes, user_addr)) {
-            let user_stake = table::borrow(&pool.stakes, user_addr);
-            user_stake.amount
+            table::borrow(&pool.stakes, user_addr).amount
         } else { 0 }
     }
 
     #[view]
-    /// Get user's unlock time
     public fun get_unlock_time(
         pool_obj: Object<StakePool>, user_addr: address
     ): u64 acquires StakePool {
@@ -779,23 +885,19 @@ module harvest::stake {
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
         let pool = borrow_global<StakePool>(pool_addr);
         assert!(table::contains(&pool.stakes, user_addr), ERR_NO_STAKE);
-        let user_stake = table::borrow(&pool.stakes, user_addr);
-        user_stake.unlock_time
+        table::borrow(&pool.stakes, user_addr).unlock_time
     }
 
     #[view]
-    /// Check if user has a stake in the pool
     public fun stake_exists(
         pool_obj: Object<StakePool>, user_addr: address
     ): bool acquires StakePool {
         let pool_addr = object::object_address(&pool_obj);
         assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
-        let pool = borrow_global<StakePool>(pool_addr);
-        table::contains(&pool.stakes, user_addr)
+        table::contains(&borrow_global<StakePool>(pool_addr).stakes, user_addr)
     }
 
     #[view]
-    /// Get pool info from registry by index
     public fun get_pool_info_from_registry(
         pool_index: u128
     ): (address, String, String) acquires AllPoolInfos {
@@ -806,26 +908,48 @@ module harvest::stake {
     }
 
     #[view]
-    /// Check if a pool exists in the registry by index
     public fun pool_exists_in_registry(pool_index: u128): bool acquires AllPoolInfos {
-        let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
-        table::contains(&all_pool_infos.pool_infos, pool_index)
+        table::contains(&borrow_global<AllPoolInfos>(@harvest).pool_infos, pool_index)
     }
 
     #[view]
-    /// Get total number of pools registered
     public fun get_total_pools_count(): u128 acquires AllPoolInfos {
-        let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
-        all_pool_infos.total_count
+        borrow_global<AllPoolInfos>(@harvest).total_count
     }
 
     #[view]
-    /// Get pool address by index
     public fun get_pool_address_by_index(pool_index: u128): address acquires AllPoolInfos {
         let all_pool_infos = borrow_global<AllPoolInfos>(@harvest);
         assert!(table::contains(&all_pool_infos.pool_infos, pool_index), ERR_NO_POOL);
-        let pool_info = table::borrow(&all_pool_infos.pool_infos, pool_index);
-        pool_info.pool_address
+        table::borrow(&all_pool_infos.pool_infos, pool_index).pool_address
+    }
+
+    /// Check if user has boost applied
+    #[view]
+    public fun user_has_boost(
+        pool_obj: Object<StakePool>, user_addr: address
+    ): bool acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        if (!table::contains(&pool.stakes, user_addr)) {
+            return false
+        };
+        let user_stake = table::borrow(&pool.stakes, user_addr);
+        option::is_some(&user_stake.nft_v1)
+            || option::is_some(&user_stake.nft_v2_address)
+    }
+
+    /// Get NFT boost config version (1 or 2)
+    #[view]
+    public fun get_boost_version(pool_obj: Object<StakePool>): u64 acquires StakePool {
+        let pool_addr = object::object_address(&pool_obj);
+        assert!(exists<StakePool>(pool_addr), ERR_NO_POOL);
+        let pool = borrow_global<StakePool>(pool_addr);
+        if (option::is_none(&pool.nft_boost_config)) {
+            return 0 // No boost configured
+        };
+        option::borrow(&pool.nft_boost_config).version
     }
 
     //==============================================================================================
@@ -833,22 +957,19 @@ module harvest::stake {
     //==============================================================================================
 
     fun is_emergency_inner(pool: &StakePool): bool {
-        pool.emergency_locked || stake_config::is_global_emergency()
+        pool.emergency_locked || stake_config_module::is_global_emergency()
     }
 
     fun is_finished_inner(pool: &StakePool): bool {
-        let now = timestamp::now_seconds();
-        now >= pool.end_timestamp
+        timestamp::now_seconds() >= pool.end_timestamp
     }
 
     fun update_accum_reward(pool: &mut StakePool) {
         let current_time = get_time_for_last_update(pool);
         let new_accum_rewards = accum_rewards_since_last_updated(pool, current_time);
-
         pool.last_updated = current_time;
-
         if (new_accum_rewards != 0) {
-            pool.accum_reward += new_accum_rewards;
+            pool.accum_reward = pool.accum_reward + new_accum_rewards;
         };
     }
 
@@ -870,8 +991,8 @@ module harvest::stake {
         accum_reward: u128, scale: u128, user_stake: &mut UserStake
     ) {
         let earned = user_earned_since_last_update(accum_reward, scale, user_stake);
-        user_stake.earned_reward +=(earned as u64);
-        user_stake.unobtainable_reward += earned;
+        user_stake.earned_reward = user_stake.earned_reward + (earned as u64);
+        user_stake.unobtainable_reward = user_stake.unobtainable_reward + earned;
     }
 
     fun user_earned_since_last_update(
